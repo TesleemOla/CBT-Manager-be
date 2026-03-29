@@ -76,11 +76,8 @@ export class QuestionsService {
 
   private parseQuestionsFromText(text: string): ParsedQuestion[] {
     const questions: ParsedQuestion[] = [];
-    // Normalize line endings and replace tabs with spaces
     const normalizedText = text.replace(/\t/g, ' ').replace(/\r\n/g, '\n');
 
-    // STEP 1: Identify question blocks.
-    // Instead of a single regex split, we iterate through segments to find where questions start.
     const lines = normalizedText.split('\n');
     const rawBlocks: string[] = [];
     let currentBlock = '';
@@ -89,13 +86,14 @@ export class QuestionsService {
       const trimmedLine = line.trim();
       if (!trimmedLine) continue;
 
-      // A line starts a new question if:
-      // 1. It starts with a number (e.g., "1.", "1)", "1  ")
-      // 2. OR it contains an option sequence like "a) " or "A. " and the previous block already had options.
       const isNewNumber = /^\d+[.)\s]\s*/.test(trimmedLine);
-      const containsOptionMarker = /(?:\s+|^)[a-eA-E][.)]\s+/.test(trimmedLine);
+      const startWithOptionMarker = /^\(?([a-eA-E])[.)]\s+/.test(trimmedLine);
+      const containsOptionMarker = /(?:\s+|^)\(?([a-eA-E])[.)]\s+/i.test(trimmedLine);
       
-      const shouldSplit = isNewNumber || (containsOptionMarker && (currentBlock.includes(' a)') || currentBlock.includes(' A)') || currentBlock.includes(' A.') || currentBlock.includes(' a.')));
+      // We only split if it's a new number OR a numberless question.
+      // A numberless question is one that contains options but DOES NOT start with one (meaning there is text before the option).
+      // Also ensure we don't split if we haven't even finished the previous question's options.
+      const shouldSplit = isNewNumber || (containsOptionMarker && !startWithOptionMarker && currentBlock.length > 50);
 
       if (shouldSplit && currentBlock) {
         rawBlocks.push(currentBlock);
@@ -113,16 +111,12 @@ export class QuestionsService {
       const block = rawBlocks[i];
       const trimmedBlock = block.trim();
       
-      // Try to extract number, but don't require it (some text files lose numbers)
       const qHeaderMatch = trimmedBlock.match(/^(\d+)[.)\s]\s*([\s\S]+)/);
-      
       let fullContent = '';
       if (qHeaderMatch) {
         fullContent = qHeaderMatch[2];
       } else {
-        // If no leading number, check if it contains options. 
-        // If it doesn't even have options, it's a passage.
-        if (!/(?:\s+|^)\(?([a-eA-E])[.)]\s+/g.test(trimmedBlock)) {
+        if (!/(?:\s+|^)\(?([a-eA-E])[.)]\s+/i.test(trimmedBlock)) {
           pendingPassage += (pendingPassage ? '\n\n' : '') + trimmedBlock;
           continue;
         }
@@ -134,31 +128,40 @@ export class QuestionsService {
         pendingPassage = ''; 
       }
 
-      // SEQUENCE-AWARE OPTION PARSING
-      const markers = Array.from(fullContent.matchAll(/(?:\s+|^)\(?([a-eA-E])[.)]\s+/g));
+      // IMPROVED OPTION PARSING: Handle missing 'a)' markers
+      const markers = Array.from(fullContent.matchAll(/(?:\s+|^)\(?([a-eA-E])[.)]\s+/gi));
       
       let finalOptions: string[] = [];
       let questionText = fullContent;
       
-      if (markers.length >= 2) {
+      if (markers.length > 0) {
         const potentialOptions: { index: number, length: number, letter: string, text: string }[] = [];
-        // Determine if sequence is A,B,C or a,b,c
-        let expectedCharCode = markers[0][1].toUpperCase().charCodeAt(0);
+        
+        // Find the first marker. If it's not 'A', we will assume everything before it was 'A'.
+        const firstMarkerLetter = markers[0][1].toUpperCase();
+        
+        if (firstMarkerLetter !== 'A' && markers.length >= 1) {
+            // Special case: Missing 'a)'. We create a virtual 'A' marker at the start of the likely option area.
+            // Heuristic: Option A usually follows the last newline or a large gap.
+            // For now, we take the text before the first marker and try to find where it starts.
+            const textBeforeFirst = fullContent.substring(0, markers[0].index!).trim();
+            const lastLineBreak = textBeforeFirst.lastIndexOf('\n');
+            const splitPoint = lastLineBreak !== -1 ? lastLineBreak : 0;
+            
+            potentialOptions.push({ index: splitPoint, length: 0, letter: 'A', text: '' });
+        }
+
+        let expectedCharCode = potentialOptions.length > 0 ? 66 : markers[0][1].toUpperCase().charCodeAt(0);
         
         for (const m of markers) {
           const letter = m[1].toUpperCase();
           const charCode = letter.charCodeAt(0);
           
-          if (charCode === expectedCharCode) {
+          if (charCode === expectedCharCode || (potentialOptions.length === 0 && charCode === 65)) {
             potentialOptions.push({ index: m.index || 0, length: m[0].length, letter, text: '' });
-            expectedCharCode++;
+            expectedCharCode = charCode + 1;
           } else if (potentialOptions.length >= 2) {
             break;
-          } else {
-            potentialOptions.length = 0;
-            const startCode = letter.charCodeAt(0);
-            potentialOptions.push({ index: m.index || 0, length: m[0].length, letter, text: '' });
-            expectedCharCode = startCode + 1;
           }
         }
 
@@ -195,7 +198,7 @@ export class QuestionsService {
     }
 
     if (questions.length === 0) {
-      throw new BadRequestException('Could not parse any questions. Please check your DOCX formatting.');
+      throw new BadRequestException('Could not parse any questions.');
     }
 
     return questions;
