@@ -115,8 +115,8 @@ export class QuestionsService {
       }
 
       // SEQUENCE-AWARE OPTION PARSING
-      // We look for a series of markers: A, B, C, D...
-      const markers = Array.from(fullContent.matchAll(/(?:\s+|^)([a-eA-E])[.)]\s+/g));
+      // We look for a series of markers: A, B, C, D... or (a), (b), (c)...
+      const markers = Array.from(fullContent.matchAll(/(?:\s+|^)\(?([a-eA-E])[.)]\s+/g));
       
       let finalOptions: string[] = [];
       let questionText = fullContent;
