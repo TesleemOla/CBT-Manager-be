@@ -76,14 +76,35 @@ export class QuestionsService {
 
   private parseQuestionsFromText(text: string): ParsedQuestion[] {
     const questions: ParsedQuestion[] = [];
-    
-    // Normalize line endings and tabs
+    // Normalize line endings and replace tabs with spaces
     const normalizedText = text.replace(/\t/g, ' ').replace(/\r\n/g, '\n');
 
-    // Split text into potential question blocks.
-    // A block starts with a number followed by . or ) and a space at the beginning of a line.
-    // We use a positive lookahead to keep the separator.
-    const rawBlocks = normalizedText.split(/(?=\n\d+[.)]\s)|(?=^\d+[.)]\s)/m).filter(b => b.trim().length > 0);
+    // STEP 1: Identify question blocks.
+    // Instead of a single regex split, we iterate through segments to find where questions start.
+    const lines = normalizedText.split('\n');
+    const rawBlocks: string[] = [];
+    let currentBlock = '';
+
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      if (!trimmedLine) continue;
+
+      // A line starts a new question if:
+      // 1. It starts with a number (e.g., "1.", "1)", "1  ")
+      // 2. OR it contains an option sequence like "a) " or "A. " and the previous block already had options.
+      const isNewNumber = /^\d+[.)\s]\s*/.test(trimmedLine);
+      const containsOptionMarker = /(?:\s+|^)[a-eA-E][.)]\s+/.test(trimmedLine);
+      
+      const shouldSplit = isNewNumber || (containsOptionMarker && (currentBlock.includes(' a)') || currentBlock.includes(' A)') || currentBlock.includes(' A.') || currentBlock.includes(' a.')));
+
+      if (shouldSplit && currentBlock) {
+        rawBlocks.push(currentBlock);
+        currentBlock = line;
+      } else {
+        currentBlock += (currentBlock ? '\n' : '') + line;
+      }
+    }
+    if (currentBlock) rawBlocks.push(currentBlock);
 
     let order = 0;
     let pendingPassage = '';
@@ -92,30 +113,28 @@ export class QuestionsService {
       const block = rawBlocks[i];
       const trimmedBlock = block.trim();
       
-      // Check if this block actually starts with a question marker
-      const qHeaderMatch = trimmedBlock.match(/^(\d+)[.)]\s+([\s\S]+)/);
+      // Try to extract number, but don't require it (some text files lose numbers)
+      const qHeaderMatch = trimmedBlock.match(/^(\d+)[.)\s]\s*([\s\S]+)/);
       
-      if (!qHeaderMatch) {
-        // This is likely a passage, title, or instruction block before questions
-        pendingPassage += (pendingPassage ? '\n\n' : '') + trimmedBlock;
-        continue;
+      let fullContent = '';
+      if (qHeaderMatch) {
+        fullContent = qHeaderMatch[2];
+      } else {
+        // If no leading number, check if it contains options. 
+        // If it doesn't even have options, it's a passage.
+        if (!/(?:\s+|^)\(?([a-eA-E])[.)]\s+/g.test(trimmedBlock)) {
+          pendingPassage += (pendingPassage ? '\n\n' : '') + trimmedBlock;
+          continue;
+        }
+        fullContent = trimmedBlock;
       }
 
-      const qNum = qHeaderMatch[1];
-      let fullContent = qHeaderMatch[2];
-      
-      // If we have a pending passage, check if it's the start of a new section
-      // Often passages end with "Read the following..."
-      // We prepend it to the current question.
       if (pendingPassage) {
         fullContent = pendingPassage + '\n\n' + fullContent;
-        // We only clear it if we're reasonably sure it was just for this or the coming group.
-        // For now, we clear it after the first question of a group.
         pendingPassage = ''; 
       }
 
       // SEQUENCE-AWARE OPTION PARSING
-      // We look for a series of markers: A, B, C, D... or (a), (b), (c)...
       const markers = Array.from(fullContent.matchAll(/(?:\s+|^)\(?([a-eA-E])[.)]\s+/g));
       
       let finalOptions: string[] = [];
@@ -123,64 +142,43 @@ export class QuestionsService {
       
       if (markers.length >= 2) {
         const potentialOptions: { index: number, length: number, letter: string, text: string }[] = [];
-        let expectedCharCode = 65; // 'A'
+        // Determine if sequence is A,B,C or a,b,c
+        let expectedCharCode = markers[0][1].toUpperCase().charCodeAt(0);
         
         for (const m of markers) {
           const letter = m[1].toUpperCase();
           const charCode = letter.charCodeAt(0);
           
           if (charCode === expectedCharCode) {
-            potentialOptions.push({ 
-              index: m.index || 0, 
-              length: m[0].length, 
-              letter, 
-              text: '' 
-            });
+            potentialOptions.push({ index: m.index || 0, length: m[0].length, letter, text: '' });
             expectedCharCode++;
           } else if (potentialOptions.length >= 2) {
-            // Sequence broke, but we already have enough options. Stop here.
             break;
           } else {
-            // Sequence never really started or restarted.
             potentialOptions.length = 0;
-            if (charCode === 65) {
-              potentialOptions.push({ 
-                index: m.index || 0, 
-                length: m[0].length, 
-                letter, 
-                text: '' 
-              });
-              expectedCharCode = 66;
-            } else {
-              expectedCharCode = 65;
-            }
+            const startCode = letter.charCodeAt(0);
+            potentialOptions.push({ index: m.index || 0, length: m[0].length, letter, text: '' });
+            expectedCharCode = startCode + 1;
           }
         }
 
         if (potentialOptions.length >= 2) {
-          const firstOpt = potentialOptions[0];
-          questionText = fullContent.substring(0, firstOpt.index).trim();
-          
+          questionText = fullContent.substring(0, potentialOptions[0].index).trim();
           for (let j = 0; j < potentialOptions.length; j++) {
             const start = potentialOptions[j].index + potentialOptions[j].length;
             const end = potentialOptions[j+1] ? potentialOptions[j+1].index : fullContent.length;
+            let content = fullContent.substring(start, end).trim();
             
-            let optionContent = fullContent.substring(start, end).trim();
-            
-            // If it's the LAST option, check if there's a trailing passage (next section header)
             if (j === potentialOptions.length - 1) {
-              // We look for a double newline or a single newline followed by significant text.
-              // This is a common pattern for "Read the following..." appearing at the end of a question block.
-              const parts = optionContent.split(/\n\s*\n|\n(?=[A-Z][a-z]+)/); 
+              const parts = content.split(/\n\s*\n|\n(?=[A-Z][a-z]+)/); 
               if (parts.length > 1) {
                 finalOptions.push(parts[0].trim());
-                // Forward the rest as a passage for the next question
                 pendingPassage = parts.slice(1).join('\n\n').trim();
               } else {
-                finalOptions.push(optionContent);
+                finalOptions.push(content);
               }
             } else {
-              finalOptions.push(optionContent);
+              finalOptions.push(content);
             }
           }
         }
