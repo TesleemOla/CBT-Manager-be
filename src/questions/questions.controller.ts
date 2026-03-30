@@ -61,8 +61,18 @@ export class QuestionsController {
 
     const parsed = await this.questionsService.parseQuestionsDocx(qBuffer);
     const answerKey = await this.questionsService.parseAnswersDocx(aBuffer);
-    const questions = await this.questionsService.bulkImport(examId, parsed, answerKey);
+    
+    const questionsCount = parsed.length;
+    const answersCount = Object.keys(answerKey).length;
 
+    if (questionsCount !== answersCount) {
+      throw new BadRequestException(
+        `Critical Discrepancy Found: Found ${questionsCount} questions in the question document, but ${answersCount} items in the answer key. ` +
+        `This mismatch must be solved before importing to ensure student scores are accurate.`
+      );
+    }
+
+    const questions = await this.questionsService.bulkImport(examId, parsed, answerKey);
     await this.examsService.updateQuestionCount(examId, questions.length);
 
     return {
