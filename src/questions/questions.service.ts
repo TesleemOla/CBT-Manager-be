@@ -76,105 +76,115 @@ export class QuestionsService {
 
   private parseQuestionsFromText(text: string): ParsedQuestion[] {
     const questions: ParsedQuestion[] = [];
-    // Normalize text: collapse consecutive spaces, tabs to spaces, standard newlines
     const normalizedText = text.replace(/\t/g, ' ').replace(/\r\n/g, '\n').replace(/ {2,}/g, ' ');
 
-    // STEP 1: Identification of question segments.
-    // Instead of line-by-line, we look for anything that starts like a question.
-    // Pattern: Newline or Start + Number + . or ) + Space
-    const segments = normalizedText.split(/(?=\n\s*\d+[.)]\s)|(?=^\d+[.)]\s)/m).filter(s => s.trim());
+    // STEP 1: Smart Block Collection
+    // We iterate line-by-line to build valid question blocks.
+    const lines = normalizedText.split('\n');
+    const rawBlocks: string[] = [];
+    let currentBlock = '';
+
+    for (const line of lines) {
+      const trimmedLine = line.trim();
+      if (!trimmedLine) continue;
+
+      // Question Start Criteria:
+      // 1. Explicit Number: Starts with digit(s) + [.) ]
+      const isExplicitNumber = /^\d+[.)\s]/.test(trimmedLine);
+      
+      // 2. Implicit Start (e.g. Q1-55 format): Contains "a) " or "(a) " after text, AND current block already has its own options.
+      const containsAMarker = /(?:\s+|^)\(?a[.)]\s+/i.test(trimmedLine);
+      const startsWithAMarker = /^\(?a[.)]\s+/i.test(trimmedLine);
+      const isImplicitNumberlessStart = containsAMarker && !startsWithAMarker && (currentBlock.toLowerCase().includes(' a)') || currentBlock.toLowerCase().includes(' (a)'));
+
+      // 3. Explicit Header: Section markers or Comprehensive text
+      const isHeader = /^(ENGLISH LANGUAGE|GENERAL PAPER|COMPREHENSION|Section)/i.test(trimmedLine);
+
+      if ((isExplicitNumber || isImplicitNumberlessStart || isHeader) && currentBlock) {
+        rawBlocks.push(currentBlock);
+        currentBlock = line;
+      } else {
+        currentBlock = currentBlock ? currentBlock + '\n' + line : line;
+      }
+    }
+    if (currentBlock) rawBlocks.push(currentBlock);
 
     let order = 0;
     let pendingPassage = '';
 
-    for (let i = 0; i < segments.length; i++) {
-        const segment = segments[i].trim();
+    for (let i = 0; i < rawBlocks.length; i++) {
+        const block = rawBlocks[i].trim();
         
-        // If a segment is very long and contains another question-like number in the middle, split it again.
-        // This handles cases where Mammoth merged lines.
-        const blocks = segment.split(/\n(?=\d+[.)]\s)/).filter(b => b.trim());
+        // Inner-block split check for merged questions (Mammoth merges some lines)
+        const subBlocks = block.split(/\n(?=\d+[.)]\s)/).filter(b => b.trim());
         
-        for (const block of blocks) {
-            const trimmedBlock = block.trim();
+        for (const subBlock of subBlocks) {
+            const content = subBlock.trim();
+            const headerMatch = content.match(/^(\d+)[.)\s]\s*([\s\S]+)/);
             
-            // Try to extract header: "1. Question Text"
-            const qHeaderMatch = trimmedBlock.match(/^(\d+)[.)]\s*([\s\S]+)/);
-            
-            let fullContent = '';
-            let qNum = -1;
-            
-            if (qHeaderMatch) {
-              qNum = parseInt(qHeaderMatch[1]);
-              fullContent = qHeaderMatch[2];
+            let qTextAndOptions = '';
+            if (headerMatch) {
+              qTextAndOptions = headerMatch[2];
             } else {
-              // If no number, it might be a block with options (Question 1-55 issue) 
-              // or a passage.
-              const hasOptions = /(?:\s+|^)\(?([a-eA-E])[.)]\s+/i.test(trimmedBlock);
+              const hasOptions = /(?:\s+|^)\(?([a-eA-E])[.)]\s+/i.test(content);
               if (!hasOptions) {
-                  pendingPassage += (pendingPassage ? '\n\n' : '') + trimmedBlock;
+                  pendingPassage += (pendingPassage ? '\n\n' : '') + content;
                   continue;
               }
-              fullContent = trimmedBlock;
+              qTextAndOptions = content;
             }
 
             if (pendingPassage) {
-              fullContent = pendingPassage + '\n\n' + fullContent;
+              qTextAndOptions = pendingPassage + '\n\n' + qTextAndOptions;
               pendingPassage = '';
             }
 
-            // OPTION PARSING
-            const markers = Array.from(fullContent.matchAll(/(?:\s+|^)\(?([a-eA-E])[.)]\s+/gi));
+            const markers = Array.from(qTextAndOptions.matchAll(/(?:\s+|^)\(?([a-eA-E])[.)]\s+/gi));
             let finalOptions: string[] = [];
-            let questionText = fullContent;
+            let questionText = qTextAndOptions;
             
             if (markers.length > 0) {
               const potentialOptions: { index: number, length: number, letter: string, text: string }[] = [];
               const firstLetter = markers[0][1].toUpperCase();
 
-              // Correct for missing "A" marker if block transitions straight to "B"
-              if (firstLetter !== 'A') {
-                const textBeforeFirst = fullContent.substring(0, markers[0].index!).trim();
+              // Correct for missing "A" marker
+              if (firstLetter !== 'A' && markers.length >= 1) {
+                const textBeforeFirst = qTextAndOptions.substring(0, markers[0].index!).trim();
                 const likelyOptAStart = textBeforeFirst.lastIndexOf('\n') + 1;
                 potentialOptions.push({ index: likelyOptAStart, length: 0, letter: 'A', text: '' });
               }
 
               let expectedCharCode = potentialOptions.length > 0 ? 66 : markers[0][1].toUpperCase().charCodeAt(0);
-              
               for (const m of markers) {
                 const letter = m[1].toUpperCase();
                 const charCode = letter.charCodeAt(0);
                 if (charCode === expectedCharCode || (potentialOptions.length === 0 && charCode === 65)) {
                   potentialOptions.push({ index: m.index || 0, length: m[0].length, letter, text: '' });
                   expectedCharCode = charCode + 1;
-                } else if (potentialOptions.length >= 2) {
-                  break; // Likely end of options for this question
-                }
+                } else if (potentialOptions.length >= 2) break;
               }
 
               if (potentialOptions.length >= 2) {
-                questionText = fullContent.substring(0, potentialOptions[0].index).trim();
+                questionText = qTextAndOptions.substring(0, potentialOptions[0].index).trim();
                 for (let j = 0; j < potentialOptions.length; j++) {
                   const start = potentialOptions[j].index + potentialOptions[j].length;
-                  const end = potentialOptions[j+1] ? potentialOptions[j+1].index : fullContent.length;
-                  let content = fullContent.substring(start, end).trim();
+                  const end = potentialOptions[j+1] ? potentialOptions[j+1].index : qTextAndOptions.length;
+                  let optBody = qTextAndOptions.substring(start, end).trim();
                   
                   if (j === potentialOptions.length - 1) {
-                    // Check for trailing instructions/passages merged into D
-                    const breakPoint = content.match(/\n\s*\n|\n(?=[A-Z][A-Za-z ]{5,})/);
+                    const breakPoint = optBody.match(/\n\s*\n|\n(?=[A-Z][A-Za-z ]{5,})/);
                     if (breakPoint) {
-                        finalOptions.push(content.substring(0, breakPoint.index!).trim());
-                        pendingPassage = content.substring(breakPoint.index! + breakPoint[0].length).trim();
+                        finalOptions.push(optBody.substring(0, breakPoint.index!).trim());
+                        pendingPassage = optBody.substring(breakPoint.index!).trim();
                     } else {
-                        finalOptions.push(content);
+                        finalOptions.push(optBody);
                     }
-                  } else {
-                    finalOptions.push(content);
-                  }
+                  } else finalOptions.push(optBody);
                 }
               }
             }
 
-            if (questionText && (finalOptions.length > 0 || i === segments.length - 1)) {
+            if (questionText && (finalOptions.length > 0 || i === rawBlocks.length - 1)) {
               questions.push({
                 text: questionText,
                 options: finalOptions.length > 0 ? finalOptions : ['No Options Provided'],
