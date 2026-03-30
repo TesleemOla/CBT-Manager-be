@@ -76,129 +76,113 @@ export class QuestionsService {
 
   private parseQuestionsFromText(text: string): ParsedQuestion[] {
     const questions: ParsedQuestion[] = [];
-    const normalizedText = text.replace(/\t/g, ' ').replace(/\r\n/g, '\n');
+    // Normalize text: collapse consecutive spaces, tabs to spaces, standard newlines
+    const normalizedText = text.replace(/\t/g, ' ').replace(/\r\n/g, '\n').replace(/ {2,}/g, ' ');
 
-    const lines = normalizedText.split('\n');
-    const rawBlocks: string[] = [];
-    let currentBlock = '';
-
-    for (const line of lines) {
-      const trimmedLine = line.trim();
-      if (!trimmedLine) continue;
-
-      const isNewNumber = /^\d+[.)\s]\s*/.test(trimmedLine);
-      const startWithOptionMarker = /^\(?([a-eA-E])[.)]\s+/.test(trimmedLine);
-      const containsOptionMarker = /(?:\s+|^)\(?([a-eA-E])[.)]\s+/i.test(trimmedLine);
-      
-      // We only split if it's a new number OR a numberless question.
-      // A numberless question is one that contains options but DOES NOT start with one (meaning there is text before the option).
-      // Also ensure we don't split if we haven't even finished the previous question's options.
-      const shouldSplit = isNewNumber || (containsOptionMarker && !startWithOptionMarker && currentBlock.length > 50);
-
-      if (shouldSplit && currentBlock) {
-        rawBlocks.push(currentBlock);
-        currentBlock = line;
-      } else {
-        currentBlock += (currentBlock ? '\n' : '') + line;
-      }
-    }
-    if (currentBlock) rawBlocks.push(currentBlock);
+    // STEP 1: Identification of question segments.
+    // Instead of line-by-line, we look for anything that starts like a question.
+    // Pattern: Newline or Start + Number + . or ) + Space
+    const segments = normalizedText.split(/(?=\n\s*\d+[.)]\s)|(?=^\d+[.)]\s)/m).filter(s => s.trim());
 
     let order = 0;
     let pendingPassage = '';
 
-    for (let i = 0; i < rawBlocks.length; i++) {
-      const block = rawBlocks[i];
-      const trimmedBlock = block.trim();
-      
-      const qHeaderMatch = trimmedBlock.match(/^(\d+)[.)\s]\s*([\s\S]+)/);
-      let fullContent = '';
-      if (qHeaderMatch) {
-        fullContent = qHeaderMatch[2];
-      } else {
-        if (!/(?:\s+|^)\(?([a-eA-E])[.)]\s+/i.test(trimmedBlock)) {
-          pendingPassage += (pendingPassage ? '\n\n' : '') + trimmedBlock;
-          continue;
-        }
-        fullContent = trimmedBlock;
-      }
-
-      if (pendingPassage) {
-        fullContent = pendingPassage + '\n\n' + fullContent;
-        pendingPassage = ''; 
-      }
-
-      // IMPROVED OPTION PARSING: Handle missing 'a)' markers
-      const markers = Array.from(fullContent.matchAll(/(?:\s+|^)\(?([a-eA-E])[.)]\s+/gi));
-      
-      let finalOptions: string[] = [];
-      let questionText = fullContent;
-      
-      if (markers.length > 0) {
-        const potentialOptions: { index: number, length: number, letter: string, text: string }[] = [];
+    for (let i = 0; i < segments.length; i++) {
+        const segment = segments[i].trim();
         
-        // Find the first marker. If it's not 'A', we will assume everything before it was 'A'.
-        const firstMarkerLetter = markers[0][1].toUpperCase();
+        // If a segment is very long and contains another question-like number in the middle, split it again.
+        // This handles cases where Mammoth merged lines.
+        const blocks = segment.split(/\n(?=\d+[.)]\s)/).filter(b => b.trim());
         
-        if (firstMarkerLetter !== 'A' && markers.length >= 1) {
-            // Special case: Missing 'a)'. We create a virtual 'A' marker at the start of the likely option area.
-            // Heuristic: Option A usually follows the last newline or a large gap.
-            // For now, we take the text before the first marker and try to find where it starts.
-            const textBeforeFirst = fullContent.substring(0, markers[0].index!).trim();
-            const lastLineBreak = textBeforeFirst.lastIndexOf('\n');
-            const splitPoint = lastLineBreak !== -1 ? lastLineBreak : 0;
+        for (const block of blocks) {
+            const trimmedBlock = block.trim();
             
-            potentialOptions.push({ index: splitPoint, length: 0, letter: 'A', text: '' });
-        }
-
-        let expectedCharCode = potentialOptions.length > 0 ? 66 : markers[0][1].toUpperCase().charCodeAt(0);
-        
-        for (const m of markers) {
-          const letter = m[1].toUpperCase();
-          const charCode = letter.charCodeAt(0);
-          
-          if (charCode === expectedCharCode || (potentialOptions.length === 0 && charCode === 65)) {
-            potentialOptions.push({ index: m.index || 0, length: m[0].length, letter, text: '' });
-            expectedCharCode = charCode + 1;
-          } else if (potentialOptions.length >= 2) {
-            break;
-          }
-        }
-
-        if (potentialOptions.length >= 2) {
-          questionText = fullContent.substring(0, potentialOptions[0].index).trim();
-          for (let j = 0; j < potentialOptions.length; j++) {
-            const start = potentialOptions[j].index + potentialOptions[j].length;
-            const end = potentialOptions[j+1] ? potentialOptions[j+1].index : fullContent.length;
-            let content = fullContent.substring(start, end).trim();
+            // Try to extract header: "1. Question Text"
+            const qHeaderMatch = trimmedBlock.match(/^(\d+)[.)]\s*([\s\S]+)/);
             
-            if (j === potentialOptions.length - 1) {
-              const parts = content.split(/\n\s*\n|\n(?=[A-Z][a-z]+)/); 
-              if (parts.length > 1) {
-                finalOptions.push(parts[0].trim());
-                pendingPassage = parts.slice(1).join('\n\n').trim();
-              } else {
-                finalOptions.push(content);
-              }
+            let fullContent = '';
+            let qNum = -1;
+            
+            if (qHeaderMatch) {
+              qNum = parseInt(qHeaderMatch[1]);
+              fullContent = qHeaderMatch[2];
             } else {
-              finalOptions.push(content);
+              // If no number, it might be a block with options (Question 1-55 issue) 
+              // or a passage.
+              const hasOptions = /(?:\s+|^)\(?([a-eA-E])[.)]\s+/i.test(trimmedBlock);
+              if (!hasOptions) {
+                  pendingPassage += (pendingPassage ? '\n\n' : '') + trimmedBlock;
+                  continue;
+              }
+              fullContent = trimmedBlock;
             }
-          }
+
+            if (pendingPassage) {
+              fullContent = pendingPassage + '\n\n' + fullContent;
+              pendingPassage = '';
+            }
+
+            // OPTION PARSING
+            const markers = Array.from(fullContent.matchAll(/(?:\s+|^)\(?([a-eA-E])[.)]\s+/gi));
+            let finalOptions: string[] = [];
+            let questionText = fullContent;
+            
+            if (markers.length > 0) {
+              const potentialOptions: { index: number, length: number, letter: string, text: string }[] = [];
+              const firstLetter = markers[0][1].toUpperCase();
+
+              // Correct for missing "A" marker if block transitions straight to "B"
+              if (firstLetter !== 'A') {
+                const textBeforeFirst = fullContent.substring(0, markers[0].index!).trim();
+                const likelyOptAStart = textBeforeFirst.lastIndexOf('\n') + 1;
+                potentialOptions.push({ index: likelyOptAStart, length: 0, letter: 'A', text: '' });
+              }
+
+              let expectedCharCode = potentialOptions.length > 0 ? 66 : markers[0][1].toUpperCase().charCodeAt(0);
+              
+              for (const m of markers) {
+                const letter = m[1].toUpperCase();
+                const charCode = letter.charCodeAt(0);
+                if (charCode === expectedCharCode || (potentialOptions.length === 0 && charCode === 65)) {
+                  potentialOptions.push({ index: m.index || 0, length: m[0].length, letter, text: '' });
+                  expectedCharCode = charCode + 1;
+                } else if (potentialOptions.length >= 2) {
+                  break; // Likely end of options for this question
+                }
+              }
+
+              if (potentialOptions.length >= 2) {
+                questionText = fullContent.substring(0, potentialOptions[0].index).trim();
+                for (let j = 0; j < potentialOptions.length; j++) {
+                  const start = potentialOptions[j].index + potentialOptions[j].length;
+                  const end = potentialOptions[j+1] ? potentialOptions[j+1].index : fullContent.length;
+                  let content = fullContent.substring(start, end).trim();
+                  
+                  if (j === potentialOptions.length - 1) {
+                    // Check for trailing instructions/passages merged into D
+                    const breakPoint = content.match(/\n\s*\n|\n(?=[A-Z][A-Za-z ]{5,})/);
+                    if (breakPoint) {
+                        finalOptions.push(content.substring(0, breakPoint.index!).trim());
+                        pendingPassage = content.substring(breakPoint.index! + breakPoint[0].length).trim();
+                    } else {
+                        finalOptions.push(content);
+                    }
+                  } else {
+                    finalOptions.push(content);
+                  }
+                }
+              }
+            }
+
+            if (questionText && (finalOptions.length > 0 || i === segments.length - 1)) {
+              questions.push({
+                text: questionText,
+                options: finalOptions.length > 0 ? finalOptions : ['No Options Provided'],
+                correctAnswer: finalOptions.length > 0 ? finalOptions[0] : 'None',
+                order: order++,
+              });
+            }
         }
-      }
-
-      if (questionText && (finalOptions.length > 0 || i === rawBlocks.length - 1)) {
-        questions.push({
-          text: questionText,
-          options: finalOptions.length > 0 ? finalOptions : ['No Options Provided'],
-          correctAnswer: finalOptions.length > 0 ? finalOptions[0] : 'None',
-          order: order++,
-        });
-      }
-    }
-
-    if (questions.length === 0) {
-      throw new BadRequestException('Could not parse any questions.');
     }
 
     return questions;
