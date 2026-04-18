@@ -136,13 +136,21 @@ export class QuestionsService {
             }
 
             if (pendingPassage) {
-              questions.push({
-                text: pendingPassage,
-                options: [],
-                correctAnswer: '',
-                order: order++,
-                isPassage: true,
-              });
+              const cleanedPassage = pendingPassage.trim();
+              const isRealPassage = cleanedPassage.length > 300 || /passage|comprehension|extract/i.test(cleanedPassage);
+
+              if (isRealPassage) {
+                questions.push({
+                  text: cleanedPassage,
+                  options: [],
+                  correctAnswer: '',
+                  order: order++,
+                  isPassage: true,
+                });
+              } else {
+                // Prepend to the next thing (question or passage)
+                qTextAndOptions = cleanedPassage + '\n\n' + qTextAndOptions;
+              }
               pendingPassage = '';
             }
 
@@ -205,12 +213,15 @@ export class QuestionsService {
     }
 
     if (pendingPassage) {
+      const cleanedPassage = pendingPassage.trim();
+      const isRealPassage = cleanedPassage.length > 300 || /passage|comprehension|extract/i.test(cleanedPassage);
+      
       questions.push({
-        text: pendingPassage,
+        text: cleanedPassage,
         options: [],
         correctAnswer: '',
         order: order++,
-        isPassage: true,
+        isPassage: isRealPassage, // Only mark as passage if it meets criteria
       });
     }
 
