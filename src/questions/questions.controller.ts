@@ -62,7 +62,7 @@ export class QuestionsController {
     const parsed = await this.questionsService.parseQuestionsDocx(qBuffer);
     const answerKey = await this.questionsService.parseAnswersDocx(aBuffer);
     
-    const questionsCount = parsed.length;
+    const questionsCount = parsed.filter(q => !q.isPassage).length;
     const answersCount = Object.keys(answerKey).length;
 
     if (questionsCount !== answersCount) {
