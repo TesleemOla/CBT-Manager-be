@@ -25,6 +25,9 @@ export class Question {
 
   @Prop()
   explanation: string;
+
+  @Prop({ default: false })
+  isPassage: boolean;
 }
 
 export const QuestionSchema = SchemaFactory.createForClass(Question);

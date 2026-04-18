@@ -25,4 +25,7 @@ export class CreateQuestionDto {
   @IsString()
   @IsOptional()
   explanation?: string;
+
+  @IsOptional()
+  isPassage?: boolean;
 }

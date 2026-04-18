@@ -10,6 +10,7 @@ interface ParsedQuestion {
   options: string[];
   correctAnswer: string;
   order: number;
+  isPassage?: boolean;
 }
 
 @Injectable()
@@ -135,7 +136,13 @@ export class QuestionsService {
             }
 
             if (pendingPassage) {
-              qTextAndOptions = pendingPassage + '\n\n' + qTextAndOptions;
+              questions.push({
+                text: pendingPassage,
+                options: [],
+                correctAnswer: '',
+                order: order++,
+                isPassage: true,
+              });
               pendingPassage = '';
             }
 
@@ -185,14 +192,26 @@ export class QuestionsService {
             }
 
             if (questionText && (finalOptions.length > 0 || i === rawBlocks.length - 1)) {
+              const isActualQuestion = finalOptions.length > 0 && finalOptions[0] !== 'No Options Provided';
               questions.push({
                 text: questionText,
                 options: finalOptions.length > 0 ? finalOptions : ['No Options Provided'],
                 correctAnswer: finalOptions.length > 0 ? finalOptions[0] : 'None',
                 order: order++,
+                isPassage: !isActualQuestion,
               });
             }
         }
+    }
+
+    if (pendingPassage) {
+      questions.push({
+        text: pendingPassage,
+        options: [],
+        correctAnswer: '',
+        order: order++,
+        isPassage: true,
+      });
     }
 
     return questions;
@@ -227,8 +246,20 @@ export class QuestionsService {
     questions: ParsedQuestion[],
     answerKey: Record<number, string>,
   ): Promise<Question[]> {
-    const docs = questions.map((q, idx) => {
-      const answerLetter = answerKey[idx + 1];
+    let questionCounter = 1;
+    const docs = questions.map((q) => {
+      if (q.isPassage) {
+        return {
+          examId,
+          text: q.text,
+          options: [],
+          correctAnswer: '',
+          order: q.order,
+          isPassage: true,
+        };
+      }
+
+      const answerLetter = answerKey[questionCounter++];
       const optionLetters = ['A', 'B', 'C', 'D', 'E'];
       const correctIndex = optionLetters.indexOf(answerLetter);
       const correctAnswer =
@@ -242,6 +273,7 @@ export class QuestionsService {
         options: q.options,
         correctAnswer,
         order: q.order,
+        isPassage: false,
       };
     });
 
