@@ -264,7 +264,7 @@ export class QuestionsService {
           examId,
           text: q.text,
           options: [],
-          correctAnswer: '',
+          correctAnswer: 'None',
           order: q.order,
           isPassage: true,
         };
